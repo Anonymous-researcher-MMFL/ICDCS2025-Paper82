@@ -70,80 +70,6 @@ def federated_prob(global_weights, models_gradient_dict, local_data_num, p_list,
 
     return global_weights_dict
 
-def compute_p_active_once(psi, window_size, args):
-    # psi is a list
-    p_active_once = np.ones_like(psi[-1]) # tasknum, clientnum
-    current_round = len(psi)
-    if current_round < (window_size+1):
-        return p_active_once, -1
-    else:
-        for t_ in range(window_size):
-            p_active_once *= (1 - psi[-2-t_])
-        p_active_once = 1 - p_active_once
-        # set 0 to 1 for elements in p_active_once
-        p_active_once[p_active_once == 0.0] = 1.0
-        # set any value in p_active_once to no less than 0.5
-        # record how many clients are below the LB
-        num_clients_below_LB = np.sum(p_active_once < args.LB)
-        p_active_once[p_active_once < args.LB] = args.LB
-        return p_active_once, num_clients_below_LB
-
-
-def compute_p_active_once_fullfill(psi, window_size):
-    # psi is a list
-    p_active_once = np.ones_like(psi[-1]) # tasknum, clientnum
-    current_round = len(psi)
-    if current_round < (window_size+1):
-        # fill the first few rounds with p[0]
-        for t_ in range(window_size):
-            if t_ < (current_round-1):
-                p_active_once *= (1 - psi[-2-t_])
-            else:
-                p_active_once *= (1 - psi[0])
-        p_active_once = 1 - p_active_once
-        # set 0 to 1 for elements in p_active_once
-        p_active_once[p_active_once == 0.0] = 1.0
-        return p_active_once
-    else:
-        for t_ in range(window_size):
-            p_active_once *= (1 - psi[-2-t_])
-        p_active_once = 1 - p_active_once
-        # set 0 to 1 for elements in p_active_once
-        p_active_once[p_active_once == 0.0] = 1.0
-        return p_active_once
-
-
-
-def window_states(allocation_history, task_index, args):
-    # use this function at the start, create a list to include all clients within the bound
-    clients_within_window = {}
-    clients_num = args.num_clients
-    for i in range(clients_num):
-        delta_t = optimal_sampling.find_recent_allocation(allocation_history, task_index, i)
-        if delta_t <= args.window_size:
-            clients_within_window[i] = delta_t
-    window_max = args.window_max
-    # if clients_within_window includes clients more than window_max, remove clients with largest delta_t
-    if len(clients_within_window) > window_max:
-        clients_within_window = dict(sorted(clients_within_window.items(), key=lambda item: item[1])[:window_max])
-    return clients_within_window
-
-def window_states_Krank(allocation_history, task_index, args):
-    # use this function at the start, create a list to include all clients within the bound
-    # if Krank is True, then window_max (K) means the most recent K stale updates
-    # and window_size will not be used
-    clients_recent_activeTime = {}
-    K = args.window_max
-    clients_num = args.num_clients
-    for i in range(clients_num):
-        delta_t = optimal_sampling.find_recent_allocation(allocation_history, task_index, i)
-        clients_recent_activeTime[i] = delta_t
-    # rank clients by their active time
-    clients_within_window = dict(sorted(clients_recent_activeTime.items(), key=lambda item: item[1])[:K])
-    # return the most recent K clients
-    return clients_within_window
-
-
 
 def federated_stale(global_weights, models_gradient_dict, local_data_num, p_list, args, chosen_clients, old_global_weights, decay_beta, allocation_result, task_index, save_path):
     global_weights_dict = global_weights.state_dict()
@@ -170,138 +96,17 @@ def federated_stale(global_weights, models_gradient_dict, local_data_num, p_list
         # For FedVARP(args.optimal_sampling is False),
         # decay_beta_record is always totally 0, old_global_weights is the original
         # FedStale has args.skipOS as True.
-        # dict, key is client index, value is delta_t
-        if args.Krank is True:
-            clients_within_window = window_states_Krank(allocation_result, task_index, args)
-        else:
-            clients_within_window = window_states(allocation_result, task_index, args)
-
-
-        if args.ubwindow is True:
-            # read past probabilities, divide probability to ensure unbiasedness
-            psi_list_file = save_path + 'psi_OS.pkl'
-            with open(psi_list_file, "rb") as f:
-                psi = pickle.load(f)
-            # compute probability of being active at least once in the window
-            p_active_once, num_clients_below_LB = compute_p_active_once(psi, args.window_size, args)
-            # store num_clients_below_LB
-            num_clients_below_LB_file = save_path + 'num_clients_below_LB.pkl'
-            optimal_sampling.append_to_pickle(num_clients_below_LB_file, num_clients_below_LB)
-
-            for i, gradient_dict in enumerate(models_gradient_dict):  # active clients
-                d_i = dis_s[chosen_clients[i]]
-                h_i = old_global_weights[chosen_clients[i]]
-                for key in global_keys:
-                    global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key] - h_i[key])
-
-
-            # only include clients within the window
-            clients_num = len(dis_s)
-
-            for i in range(clients_num):
-                # to decide if client i is within the window
-                # delta_t = optimal_sampling.find_recent_allocation(allocation_result, task_index, i)
-                # use clients_within_window, keys: client index, values: delta_t
-                if i in clients_within_window:
-                    d_i = dis_s[i]
-                    d_i = d_i / p_active_once[task_index, i]  # where we make it unbiased
-                    h_i = old_global_weights[i]
-                    for key in global_keys:
-                        global_weights_dict[key] -= d_i * h_i[key]
-
-        elif args.ubwindow2 is True:
-            # read past probabilities, divide probability to ensure unbiasedness
-            for i, gradient_dict in enumerate(models_gradient_dict):  # active clients
-                # delta_t = optimal_sampling.find_recent_allocation(allocation_result, task_index, chosen_clients[i])
-                if chosen_clients[i] in clients_within_window:
-                    d_i = dis_s[chosen_clients[i]]
-                    h_i = old_global_weights[chosen_clients[i]]
-                    for key in global_keys:
-                        global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key] - h_i[key])
-                else:
-                    d_i = dis_s[chosen_clients[i]]
-                    for key in global_keys:
-                        global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key])
-
-            # only include clients within the window
-            clients_num = len(dis_s)
-
-            for i in range(clients_num):
-                # to decide if client i is within the window
-                #delta_t = optimal_sampling.find_recent_allocation(allocation_result, task_index, i)
-                if i in clients_within_window:
-                    d_i = dis_s[i]
-                    h_i = old_global_weights[i]
-                    for key in global_keys:
-                        global_weights_dict[key] -= d_i * h_i[key]
-
-        elif args.ubwindow3 is True:
-            # read past probabilities, divide probability to ensure unbiasedness
-            psi_list_file = save_path + 'psi_OS.pkl'
-            with open(psi_list_file, "rb") as f:
-                psi = pickle.load(f)
-            # compute probability of being active at least once in the window
-            p_active_once, num_clients_below_LB = compute_p_active_once(psi, args.window_size, args)
-            # store num_clients_below_LB
-            num_clients_below_LB_file = save_path + 'num_clients_below_LB.pkl'
-            optimal_sampling.append_to_pickle(num_clients_below_LB_file, num_clients_below_LB)
-
-            for i, gradient_dict in enumerate(models_gradient_dict):  # active clients
-                #delta_t = optimal_sampling.find_recent_allocation(allocation_result, task_index, chosen_clients[i])
-                if chosen_clients[i] in clients_within_window:
-                    d_i = dis_s[chosen_clients[i]]
-                    h_i = old_global_weights[chosen_clients[i]]
-                    for key in global_keys:
-                        global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key] - h_i[key]/p_active_once[task_index, chosen_clients[i]])
-                else:
-                    d_i = dis_s[chosen_clients[i]]
-                    for key in global_keys:
-                        global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key])
-
-
-            # only include clients within the window
-            clients_num = len(dis_s)
-
-            for i in range(clients_num):
-                # to decide if client i is within the window
-                #delta_t = optimal_sampling.find_recent_allocation(allocation_result, task_index, i)
-                if i in clients_within_window:
-                    d_i = dis_s[i]
-                    d_i = d_i / p_active_once[task_index, i]
-                    h_i = old_global_weights[i]
-                    for key in global_keys:
-                        global_weights_dict[key] -= d_i * h_i[key]
-        elif args.window is True:  # biased window
-            for i, gradient_dict in enumerate(models_gradient_dict):  # active clients
-                d_i = dis_s[chosen_clients[i]]
-                h_i = old_global_weights[chosen_clients[i]]
-                for key in global_keys:
-                    global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key] - h_i[key])
-
-
-            # only include clients within the window
-            clients_num = len(dis_s)
-
-            for i in range(clients_num):
-                # to decide if client i is within the window
-                # delta_t = optimal_sampling.find_recent_allocation(allocation_result, task_index, i)
-                if i in clients_within_window:
-                    d_i = dis_s[i]
-                    h_i = old_global_weights[i]
-                    for key in global_keys:
-                        global_weights_dict[key] -= d_i * h_i[key]
-
-        else: # sum for all clients
-            for i, gradient_dict in enumerate(models_gradient_dict):  # active clients
-                d_i = dis_s[chosen_clients[i]]
-                h_i = old_global_weights[chosen_clients[i]]
-                for key in global_keys:
-                    # if we use summation window, then should minus h_i * window_size
-                    global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key] - h_i[key])
-            clients_num = len(dis_s)
-            for i in range(clients_num):
-                d_i = dis_s[i]
-                h_i = old_global_weights[i]
-                for key in global_keys:
-                    global_weights_dict[key] -= d_i * h_i[key]
+        # dict, key is client index, value is delta_
+        for i, gradient_dict in enumerate(models_gradient_dict):  # active clients
+            d_i = dis_s[chosen_clients[i]]
+            h_i = old_global_weights[chosen_clients[i]]
+            for key in global_keys:
+                # if we use summation window, then should minus h_i * window_size
+                global_weights_dict[key] -= (d_i / p_list[i]) * (gradient_dict[key] - h_i[key])
+        clients_num = len(dis_s)
+        for i in range(clients_num):
+            d_i = dis_s[i]
+            h_i = old_global_weights[i]
+            for key in global_keys:
+                global_weights_dict[key] -= d_i * h_i[key]
     return global_weights_dict
